@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Run tests
+        run: npm test
+        env:
+          MAINLAYER_API_KEY: ${{ secrets.MAINLAYER_API_KEY }}
+          MAINLAYER_PRO_RESOURCE_ID: ${{ secrets.MAINLAYER_PRO_RESOURCE_ID }}
+          MAINLAYER_ENTERPRISE_RESOURCE_ID: ${{ secrets.MAINLAYER_ENTERPRISE_RESOURCE_ID }}
+          SESSION_SECRET: test-session-secret
+
+      - name: Build
+        run: npm run build
+        env:
+          MAINLAYER_API_KEY: ${{ secrets.MAINLAYER_API_KEY }}
+          SESSION_SECRET: test-session-secret
