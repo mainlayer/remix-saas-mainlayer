@@ -1,92 +1,72 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from '@remix-run/node';
-import { json, redirect } from '@remix-run/node';
+import { json } from '@remix-run/node';
 import { useLoaderData, Form, useActionData } from '@remix-run/react';
 import { requireUserId } from '~/lib/auth.server';
 import {
   checkSubscription,
-  createCheckoutSession,
-  createBillingPortalSession,
-  PLAN_RESOURCE_IDS,
+  getPlans,
+  getPlanById,
+  createSubscription,
+  PLANS,
   type Plan,
 } from '~/lib/mainlayer.server';
 
 export const meta: MetaFunction = () => [{ title: 'Billing — Remix SaaS' }];
 
-const PLANS: Array<{
-  id: Plan;
-  name: string;
-  price: string;
-  description: string;
-  features: string[];
-}> = [
-  {
-    id: 'free',
-    name: 'Free',
-    price: '$0/month',
-    description: 'Get started for free.',
-    features: ['5 projects', '1 GB storage', 'Community support'],
-  },
-  {
-    id: 'pro',
-    name: 'Pro',
-    price: '$29/month',
-    description: 'Everything you need to scale.',
-    features: ['Unlimited projects', '50 GB storage', 'Priority support', 'Analytics'],
-  },
-  {
-    id: 'enterprise',
-    name: 'Enterprise',
-    price: 'Custom',
-    description: 'For large teams with advanced needs.',
-    features: ['Everything in Pro', 'SSO', 'Audit logs', 'SLA', 'Dedicated support'],
-  },
-];
-
 export async function loader({ request }: LoaderFunctionArgs) {
   const userId = await requireUserId(request);
-  const [proAccess, enterpriseAccess] = await Promise.all([
-    checkSubscription(userId, PLAN_RESOURCE_IDS.pro),
-    checkSubscription(userId, PLAN_RESOURCE_IDS.enterprise),
-  ]);
-  const currentPlan: Plan = enterpriseAccess.authorized
-    ? 'enterprise'
-    : proAccess.authorized
-    ? 'pro'
-    : 'free';
-  return json({ currentPlan });
+
+  // Check current subscription status for each plan
+  const plans = getPlans();
+  const statuses = await Promise.all(
+    plans.map(plan => checkSubscription(userId, plan.id as Plan))
+  );
+
+  // Find highest tier subscription
+  let currentPlan: Plan = 'free';
+  if (statuses.some(s => s.plan === 'enterprise' && s.authorized)) {
+    currentPlan = 'enterprise';
+  } else if (statuses.some(s => s.plan === 'pro' && s.authorized)) {
+    currentPlan = 'pro';
+  }
+
+  return json({
+    currentPlan,
+    plans,
+  });
 }
 
 export async function action({ request }: ActionFunctionArgs) {
   const userId = await requireUserId(request);
-  const formData = await request.formData();
-  const intent = formData.get('intent') as string;
 
-  const origin = new URL(request.url).origin;
-
-  if (intent === 'portal') {
-    const url = await createBillingPortalSession(userId, `${origin}/billing`);
-    return redirect(url);
+  if (request.method !== 'POST') {
+    return json({ error: 'Method not allowed' }, { status: 405 });
   }
 
+  const formData = await request.formData();
+  const intent = formData.get('intent');
+  const planId = formData.get('plan') as string;
+
   if (intent === 'subscribe') {
-    const plan = formData.get('plan') as Plan;
-    if (!plan || !PLAN_RESOURCE_IDS[plan]) {
+    const plan = getPlanById(planId);
+    if (!plan) {
       return json({ error: 'Invalid plan selected.' }, { status: 400 });
     }
-    const url = await createCheckoutSession(
-      userId,
-      PLAN_RESOURCE_IDS[plan],
-      `${origin}/billing?success=true`,
-      `${origin}/billing?canceled=true`,
-    );
-    return redirect(url);
+
+    try {
+      const subscription = await createSubscription(userId, plan.id as Plan);
+      return json({ success: true, subscription });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Subscription failed';
+      return json({ error: message }, { status: 500 });
+    }
   }
 
   return json({ error: 'Unknown action.' }, { status: 400 });
 }
 
 export default function Billing() {
-  const { currentPlan } = useLoaderData<typeof loader>();
+  const { currentPlan, plans } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
 
   return (
@@ -98,18 +78,12 @@ export default function Billing() {
         <span className="font-bold text-lg">Billing</span>
       </nav>
 
-      <main className="max-w-4xl mx-auto px-8 py-10 space-y-8">
-        <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-bold">Plans & Billing</h1>
-          <Form method="post">
-            <input type="hidden" name="intent" value="portal" />
-            <button
-              type="submit"
-              className="px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
-            >
-              Manage Billing Portal
-            </button>
-          </Form>
+      <main className="max-w-6xl mx-auto px-8 py-10 space-y-8">
+        <div>
+          <h1 className="text-3xl font-bold">Plans & Pricing</h1>
+          <p className="text-gray-600 mt-2">
+            Choose the perfect plan for your needs. Upgrade or downgrade at any time.
+          </p>
         </div>
 
         {actionData && 'error' in actionData && (
@@ -118,33 +92,58 @@ export default function Billing() {
           </div>
         )}
 
-        <div className="grid grid-cols-3 gap-6">
-          {PLANS.map((plan) => {
+        {actionData && 'success' in actionData && (
+          <div className="bg-green-50 border border-green-200 text-green-700 rounded-lg p-4">
+            Subscription updated successfully!
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+          {plans.map((plan) => {
             const isCurrent = plan.id === currentPlan;
+            const priceDisplay = plan.price_usd_cents === 0
+              ? 'Free'
+              : `$${(plan.price_usd_cents / 100).toFixed(2)}`;
+
             return (
               <div
                 key={plan.id}
-                className={`bg-white rounded-lg border p-6 ${
-                  isCurrent ? 'border-blue-500 ring-2 ring-blue-200' : ''
+                className={`bg-white rounded-xl border-2 p-8 transition-all ${
+                  isCurrent
+                    ? 'border-blue-500 ring-2 ring-blue-200 shadow-lg'
+                    : 'border-gray-200 hover:border-gray-300'
                 }`}
               >
-                <h3 className="font-semibold text-lg">{plan.name}</h3>
-                <p className="text-2xl font-bold mt-1">{plan.price}</p>
-                <p className="text-sm text-gray-500 mt-1">{plan.description}</p>
-                <ul className="mt-4 space-y-2 text-sm text-gray-600">
-                  {plan.features.map((f) => (
-                    <li key={f}>✓ {f}</li>
+                <div className="mb-6">
+                  <h3 className="font-bold text-xl">{plan.name}</h3>
+                  <p className="text-sm text-gray-600 mt-1">{plan.description}</p>
+                </div>
+
+                <div className="mb-6">
+                  <p className="text-4xl font-bold">{priceDisplay}</p>
+                  <p className="text-sm text-gray-600">per month</p>
+                </div>
+
+                <ul className="space-y-3 mb-8">
+                  {plan.features.map((feature) => (
+                    <li key={feature} className="flex gap-3 text-sm">
+                      <span className="text-green-600 font-bold">✓</span>
+                      <span className="text-gray-700">{feature}</span>
+                    </li>
                   ))}
                 </ul>
-                <div className="mt-6">
+
+                <div className="pt-8 border-t">
                   {isCurrent ? (
-                    <span className="block text-center text-sm font-medium text-blue-600">
-                      Current Plan
-                    </span>
+                    <div className="text-center py-3 px-4 bg-blue-50 rounded-lg">
+                      <p className="text-sm font-medium text-blue-600">
+                        Current Plan
+                      </p>
+                    </div>
                   ) : plan.id === 'enterprise' ? (
                     <a
-                      href="mailto:sales@mainlayer.fr"
-                      className="block text-center px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
+                      href="mailto:sales@mainlayer.fr?subject=Enterprise%20Plan%20Inquiry"
+                      className="block text-center py-3 px-4 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 transition"
                     >
                       Contact Sales
                     </a>
@@ -154,9 +153,9 @@ export default function Billing() {
                       <input type="hidden" name="plan" value={plan.id} />
                       <button
                         type="submit"
-                        className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
+                        className="w-full py-3 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition"
                       >
-                        Upgrade to {plan.name}
+                        {currentPlan === 'free' ? 'Upgrade to ' : 'Switch to '}{plan.name}
                       </button>
                     </Form>
                   )}
@@ -164,6 +163,27 @@ export default function Billing() {
               </div>
             );
           })}
+        </div>
+
+        <div className="bg-white rounded-lg border p-8 mt-12">
+          <h2 className="text-lg font-bold mb-4">Billing & Support</h2>
+          <p className="text-gray-700 mb-4">
+            Need help with your subscription or have billing questions?
+          </p>
+          <div className="flex gap-4">
+            <a
+              href="https://docs.mainlayer.fr"
+              className="px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
+            >
+              Documentation
+            </a>
+            <a
+              href="mailto:support@mainlayer.fr"
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
+            >
+              Contact Support
+            </a>
+          </div>
         </div>
       </main>
     </div>
